@@ -295,9 +295,9 @@ def get_result_stats_df(dict_results, algocols=None, decs=3, _max=True):
         d_[k] = list(d[k].values())
     d = d_
     ddf = pd.DataFrame(d)[algocols]
-    
+        
     r1={"dataset": "AVG"}
-    for c in ddf.columns: r1[c] = ddf[c].mean(axis=0).round(decs)
+    for c in ddf.columns: r1[c] = np.array(ddf[c].mean(axis=0)).round(decs)
     
     r2 = get_top_algo_count({"dataset": "WIN"}, ddf, algocols, decs=decs, _max=_max)
     
