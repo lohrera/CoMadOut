@@ -1,12 +1,17 @@
-tbb
-daal 
+numpy==1.19.2
+
 wget==3.2
 ruamel.yaml==0.17.16
 ruamel.yaml.clib==0.2.6
 
-pandas
-pyod
-tensorflow
-tensorflow-estimator
-torch
-fast-map
+tensorflow==2.7
+tensorflow-estimator==2.7
+torch==1.10.0
+fast-map==0.0.7
+
+pandas==1.4.3
+pyod==0.9.5
+matplotlib==3.6.2
+
+memory_profiler
+protobuf==3.20.1
