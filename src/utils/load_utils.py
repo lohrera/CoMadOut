@@ -11,14 +11,16 @@ from src.oab.data.load_dataset import load_dataset
 from src.oab.data.classification_dataset import ClassificationDataset
 from scipy.io import loadmat
 import random
+import glob
 import os
 
-def load_local_mat(datasets_folder, datasetname, add_rand_cols=0, verbose=False):
+def load_local_mat(datasets_folder, datasetname, add_rand_cols=0, verbose=False, limit=1000000): #limit=650000):
 
     folderpath = f"{datasets_folder}/{datasetname}"
     os.makedirs(folderpath, exist_ok=True)
-
+    
     filepath = f"{folderpath}/{datasetname}.mat"
+    filepathnpz = f"{folderpath}/{datasetname}/*.npz"
     filename_in_folder = f"{folderpath}/{datasetname}.csv"
     
     if not os.path.exists(filename_in_folder):
@@ -26,18 +28,49 @@ def load_local_mat(datasets_folder, datasetname, add_rand_cols=0, verbose=False)
             folderpath = f"./src/utils"
             filename_in_folder = f"{folderpath}/{datasetname}.csv"
         else:
+            X,y=None,None
             try:
-                file = h5py.File(filepath,'r')
+                filepathnpz = f"{folderpath}/{datasetname}*.npz"
+                for filepath in glob.glob(filepathnpz):
+                    file_content = np.load(filepath, allow_pickle=True)
+                    X_ = file_content['X']
+                    y_ = file_content['y']
+                    if len(y_.shape)==1: y_ = np.expand_dims(y_, 1)
+                    if X is None:
+                        X,y = X_,y_
+                    else:
+                        X = np.vstack((X, X_))
+                        y = np.vstack((y, y_))
             except Exception as e:
                 file_content = loadmat(filepath)
+                X = file_content['X']
+                y = file_content['y']
+                if len(y.shape)==1: y = np.expand_dims(y, 1)
 
-            X = file_content['X']
-            y = file_content['y']
             all = np.hstack((X, y)) 
-            np.savetxt(filename_in_folder, all, delimiter=",")
 
-    df = pd.read_csv(filename_in_folder)    
-    vals, labels = df.iloc[:, :-1], df.iloc[:, -1]
+            print(all.shape)
+            if os.path.isfile(filename_in_folder): os.remove(filename_in_folder)
+            try:
+                np.savetxt(filename_in_folder, all, delimiter=",")  # , fmt='%.18f'
+            except Exception as e:
+                print(e)
+                os.remove(filename_in_folder)
+
+    hd='infer' if os.path.isfile(f"{folderpath}/header.txt") else None
+    df = pd.read_csv(filename_in_folder, header=hd, dtype=np.float64)
+    
+    maxrows=df.shape[0]
+    cursize=df.shape[0]*df.shape[1]
+    if cursize > limit:
+        maxrows = limit // df.shape[1]
+        print(f"{datasetname}: {df.shape[0]} -> {maxrows}")
+        df = df.sample(n=maxrows, replace=False, random_state=1)
+        df = df.reset_index(drop=True)
+        df = df.astype(dtype=np.float64)
+        
+    vals   = df.iloc[:,:-1].astype(dtype=np.float64)
+    labels = df.iloc[:, -1].astype(dtype=np.float64)
     
     # add random noise columns    
     values = vals.values    
@@ -46,7 +79,7 @@ def load_local_mat(datasets_folder, datasetname, add_rand_cols=0, verbose=False)
         for i in range(0,vals.shape[0]):
             _3d[i] = random.random() * (vals.values[:,0].max() - vals.values[:,0].min())
         values = np.concatenate((values, _3d), axis=1)
-        vals = pd.DataFrame(values)
+        vals = pd.DataFrame(values, dtype=np.float64)
         
     if verbose:
         print(f"X.shape {vals.shape} y.shape {labels.shape}")
