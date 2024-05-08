@@ -9,6 +9,7 @@ Python implementation of CoMadOut variants.
 ## Getting Started
 
 For a quick start open CoMadOut-tutorial.ipynb 
+
 For benchmark results open CoMadOut.ipynb 
 
 Install packages with:
