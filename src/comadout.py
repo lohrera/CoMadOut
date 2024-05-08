@@ -1,17 +1,19 @@
 import numpy as np
 import pandas as pd
 import copy
+from fast_map import fast_map_async
 from scipy.special import softmax
 
 from matplotlib import pyplot as plt
-from sklearn.decomposition import PCA
+#from sklearn.decomposition import PCA
+from pyod.models.pca import PCA
 
 from src.comad_pca import ComadPCA
 
 
 class ComadOut():
     
-    def __init__(self, n_epochs=1, lr=0.1, n_components=2, title='', noise_margin=True, softmax_scoring=True, center_by='median', pca=False, sample_pc_outl_score_selection='mean', random_state=0, verbose=0, fast=False):
+    def __init__(self, n_components=2, title='', noise_margin=True, softmax_scoring=True, center_by='median', centermethod='offset', pca=False, sample_pc_outl_score_selection='mean', random_state=0, verbose=0, fast=False, opt_evals=False, scaler=None):
         super(ComadOut, self)
         
         self._n_components_param=n_components
@@ -21,19 +23,23 @@ class ComadOut():
         self._softmax_scoring=softmax_scoring
         self._sample_pc_outl_score_selection=sample_pc_outl_score_selection
         self._center_by=center_by
+        self._centermethod=centermethod
         self._verbose=verbose
         self._pca=pca
         self._outlier_threshold=None
         self._total_components=None
         self.decision_scores_ = None
         self._random_state=random_state
+        self._opt_evals=opt_evals
+        self._scaler=scaler
         self._fast=fast
         self._cpca=None
             
     def fit(self, X):
         labels,scores=[],[]
         
-        if type(X) != pd.DataFrame: X = pd.DataFrame(X)            
+        if type(X) != pd.DataFrame: X = pd.DataFrame(X, dtype=np.float64)      
+        X = X.apply(pd.to_numeric)   
         df_X = copy.deepcopy(X)    
         
         self._total_components = df_X.shape[1]
@@ -45,17 +51,37 @@ class ComadOut():
             self._n_components = 2
                     
         cpca, eigenvalues, eigenvectors = None, None, None
-        if not self._pca: #comadpca
-            cpca = ComadPCA(n_components=self._n_components, center_by=self._center_by, random_state=self._random_state, fast=self._fast).fit(df_X)
+        if not self._pca: #comadpca      
+            
+            from sklearn.preprocessing import RobustScaler, StandardScaler
+            if self._scaler == 'Robust':    
+                df_X = pd.DataFrame(RobustScaler().fit_transform(df_X))
+            elif self._scaler == 'Standard': 
+                df_X = pd.DataFrame(StandardScaler().fit_transform(df_X))
+            
+            cpca = ComadPCA(n_components=self._n_components, center_by=self._center_by, centermethod=self._centermethod, sign_flip=False, random_state=self._random_state, fast=self._fast).fit(df_X)
+            self._X_prj = cpca.transform(df_X)
+            
             eigenvectors = cpca.eigenvectors_v
             eigenvalues = cpca.eigenvalues_lambda
-        else:            
+        else:
             cpca = PCA(n_components=self._n_components, random_state=self._random_state).fit(df_X)
+            self._X_prj = cpca.detector_.transform(df_X)
+            
             eigenvectors = cpca.components_
-            eigenvalues = cpca.singular_values_
+            eigenvalues = cpca.explained_variance_
+           
+        if self._opt_evals:
+            if np.any(cpca.explained_variance_ < 0.): 
+                #print(f"!!!! matrix M not positive-semidefinite with eigenvalues {cpca.explained_variance_}") # <- circumstance well known for comad
+                eigenvalues = np.abs(cpca.explained_variance_) 
+            
+        if not self._pca: #comad
+            cpca.explained_variance_ratio_ = eigenvalues / np.sum(eigenvalues)
+            cpca.explained_variance_ = eigenvalues
+            cpca.eigenvalues_lambda = eigenvalues
         
         self._cpca = cpca
-        self._X_prj = cpca.transform(df_X)
 
         self._X_prj, all_pred_labels, all_pred_scores = self._outlier_detection(
             self._X_prj, self._n_components, eigenvectors, eigenvalues, self._title, self._noise_margin, self._sample_pc_outl_score_selection, self._softmax_scoring, self._verbose)
@@ -93,7 +119,7 @@ class ComadOut():
         return pd.DataFrame(result)
     
     def _get_subspace_axis_vector_after_transform(self, eigenvectors, pc_idx):
-        return np.array([(0.,1.)[pc_idx==idx] for idx in range(0, eigenvectors.shape[0])])
+        return np.identity(eigenvectors.shape[0])[pc_idx,:]
     
     def _or(self, mat, sample_idx):
         retval = None
@@ -146,10 +172,8 @@ class ComadOut():
         labels = [self._or(all_labels, i) for i in range(num_samples)]
         scores = [self._min(all_scores, margins, sample_pc_outl_score_selection, i) for i in range(num_samples)]  
                 
-        if softmax_scoring: 
-            med = np.median(np.array(all_scores), axis=1)
-            all_scores_centered = np.array(all_scores).T - med
-            scores = np.max(softmax(all_scores_centered.T, axis=0)[:,:], axis=0)
+        if softmax_scoring: # for comad AD only the explained_variance_ correlation magnitude (defensively scaled by sqrt) is relevant
+            scores = softmax(np.array(all_scores).T/np.sqrt(np.abs(self._cpca.explained_variance_)), axis=1).max(axis=1)
             
         return labels, scores
     
@@ -163,11 +187,10 @@ class ComadOut():
 
             ev_subspace_axis = self._get_subspace_axis_vector_after_transform(eigenvectors, pc_idx)
             prj = self._get_orthogonal_projection(X_prj, ev_subspace_axis)
-            distances = np.sqrt((prj**2).sum(axis=1)) 
+            distances = np.sqrt((prj**2).sum(axis=1)).astype(dtype=np.float64)
             if verbose: print(distances)
-
-            lamb = np.sqrt(eigenvalues[pc_idx])
-            comad_threshold = lamb #* evec_len # evec (unit vector) length 1
+            
+            comad_threshold = eigenvalues[pc_idx] #* evec_len # evec (unit vector) length 1
             comad_threshold = max(comad_threshold, eps) # avoiding zero-thresholds
             
             if not noise_margin:
@@ -183,6 +206,8 @@ class ComadOut():
             all_labels_per_dim.append(self._pc_outliers(distances, self._outlier_threshold, pc_idx, verbose=verbose))
             all_scores_per_dim.append(distances)
                         
+        self._margins = margins
+        
         # get predictions and scores 
         labels, scores = self._get_result(all_labels_per_dim, all_scores_per_dim, margins, sample_pc_outl_score_selection, softmax_scoring)
         

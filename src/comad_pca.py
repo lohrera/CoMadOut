@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
-from itertools import combinations
+from src.utils.stats_utils import zscore
+from itertools import combinations_with_replacement
 from fast_map import fast_map_async
 from mpl_toolkits import mplot3d
 import matplotlib.pyplot as plt
@@ -8,7 +9,7 @@ import math
 
 class ComadPCA(object):
     
-    def __init__(self, n_components=2, center_by='median', sign_flip=True, random_state=0, verbose=0, fast=False):
+    def __init__(self, n_components=2, center_by='median', centermethod='offset', sign_flip=False, random_state=0, verbose=0, fast=False):
         
         self.n_components=n_components
         self.n_components_=n_components
@@ -18,6 +19,7 @@ class ComadPCA(object):
         self.explained_variance_ratio_ = None
         self.centering_offset = None
         self.centering_by = center_by # 'median' -> comadPCA, 'mean' -> Standard PCA
+        self.centermethod = centermethod # 'offset' or 'zscore'
         self.sign_flip = sign_flip
         self.random_state=random_state
         self.verbose=verbose
@@ -27,16 +29,17 @@ class ComadPCA(object):
         
     def coMAD(self, X):
         
-        if type(X) != pd.DataFrame: X = pd.DataFrame(X)         
+        if type(X) != pd.DataFrame: X = pd.DataFrame(X, dtype=np.float64)
+        X = X.apply(pd.to_numeric)
         
         # Eq.3:
         # A_i - med(A_i)
         X_centered = X - self.centering_offset # # 'median' -> comadPCA, 'mean' -> Standard PCA
-
+                
         # Eq.1: 
         # [comad(A_1, A_1)...comad(A_d, A_d)]
         
-        coMAD = np.zeros((X_centered.shape[1],X_centered.shape[1]))
+        coMAD = np.zeros((X_centered.shape[1],X_centered.shape[1]), dtype=np.float64)
         median_center = (self.centering_by=='median')
         for i in range(X_centered.shape[1]): 
             for j in range(X_centered.shape[1]): 
@@ -50,12 +53,13 @@ class ComadPCA(object):
                 else:
                     coMAD[i,j] = centered_product_of_feat_ij.mean()
                 
-        return pd.DataFrame(coMAD)
+        return pd.DataFrame(coMAD, dtype=np.float64)
     
     
     def coMAD_fast(self, X):        
         
-        if type(X) != pd.DataFrame: X = pd.DataFrame(X)         
+        if type(X) != pd.DataFrame: X = pd.DataFrame(X, dtype=np.float64)
+        X = X.apply(pd.to_numeric)
         
         # Eq.3:
         # A_i - med(A_i)
@@ -64,7 +68,7 @@ class ComadPCA(object):
         # Eq.1: 
         # [comad(A_1, A_1)...comad(A_d, A_d)]
         
-        coMAD = np.zeros((X_centered.shape[1],X_centered.shape[1]))
+        coMAD = np.zeros((X_centered.shape[1],X_centered.shape[1]), dtype=np.float64)
         median_center = (self.centering_by=='median')
         
         def calculate_coMAD_ij(combi):
@@ -86,19 +90,22 @@ class ComadPCA(object):
             i,j=combi
             coMAD[i,j] = retval
             coMAD[j,i] = retval
-
-        combis = combinations(range(X_centered.shape[1]), 2)
+        
+        combis = combinations_with_replacement(range(X_centered.shape[1]), 2) # e.g. 2 columns with indexes 0 and 1 -> [(0,0),(0,1),(1,1)]
         t = fast_map_async(calculate_coMAD_ij, list(combis), on_result=on_result, threads_limit=None)
         t.join()
         
-        return pd.DataFrame(coMAD)
+        return pd.DataFrame(coMAD, dtype=np.float64)
     
     
     def runPCA(self, A):
         
+        A = A.astype(dtype=np.float64)
+        
         lamb, v = np.linalg.eig(A)
         pc_idxs = np.argsort(lamb)[::-1]
-        evals, evecs = lamb[pc_idxs], v.T[pc_idxs]
+        evals = lamb[pc_idxs].astype(dtype=np.float64)
+        evecs = v.T[pc_idxs].astype(dtype=np.float64)
         if self.sign_flip: evecs = -evecs
         
         evals, evecs = evals[:self.n_components], evecs[:self.n_components, :]
@@ -106,22 +113,22 @@ class ComadPCA(object):
         if self.verbose:
             print(f"ComadPCA-runPCA: evals{evals.shape}:\n{evals}")
             print(f"ComadPCA-runPCA: evecs{evecs.shape}:\n{evecs}")     
-        
-        evals = abs(evals) #to check for numerical stability
-        
+                
         return evals, evecs
     
     
     def fit(self, X_train):
         
-        if type(X_train) != pd.DataFrame: X_train = pd.DataFrame(X_train)        
+        if type(X_train) != pd.DataFrame: X_train = pd.DataFrame(X_train, dtype=np.float64)   
+        X_train = X_train.apply(pd.to_numeric)
+        
         self.n_samples_ = X_train.shape[0]
         self.n_features_in_ = X_train.shape[1]
         self.n_features_ = X_train.shape[1]
                 
         if self.centering_by=='median':
             self.median_ = np.array(X_train.median(axis=0)) #Eq.3: med(A_i)
-            self.centering_offset = self.median_ 
+            self.centering_offset = self.median_
         else:
             self.mean_ = np.array(X_train.mean(axis=0))
             self.centering_offset = self.mean_ 
